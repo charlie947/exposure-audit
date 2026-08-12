@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<!--
+  exposure-audit report template. Brand-locked: navy #00132F on white, Space Grotesk
+  (installed locally, so no webfont request), orange #D97557 as the only accent.
+  Self-contained — no external requests. Replace the {{...}} markers and the example
+  blocks, keep the component classes.
+
+  Section order is deliberate: verdict, do-now, later, clean, full table. Most people
+  read the first sentence and the first finding, so the highest-downside item goes at #1.
+-->
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<title>{{TITLE}}</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 56px 40px 80px;
+    font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #00132F; background: #FFFFFF; line-height: 1.55; font-size: 16px;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; }
+  .eyebrow { font-size: 13px; letter-spacing: .14em; text-transform: uppercase; color: #6B7A90; margin-bottom: 10px; }
+  h1 { font-size: 38px; line-height: 1.15; font-weight: 700; margin: 0 0 6px; }
+  h1 .accent { color: #D97557; }
+  .sub { font-size: 17px; color: #43526B; margin: 0 0 34px; }
+  .verdict { border-left: 5px solid #D97557; background: #FBF4F1; padding: 20px 24px; margin: 0 0 40px; border-radius: 0 6px 6px 0; }
+  .verdict p { margin: 0 0 10px; font-size: 18px; font-weight: 500; }
+  .verdict p:last-child { margin: 0; font-size: 15px; font-weight: 400; color: #43526B; }
+  h2 { font-size: 22px; font-weight: 700; margin: 46px 0 6px; }
+  h2 .num { color: #D97557; }
+  .h2note { font-size: 14px; color: #6B7A90; margin: 0 0 18px; }
+  .finding { border: 1px solid #E3E8EF; border-radius: 8px; padding: 18px 22px; margin-bottom: 14px; }
+  .finding.crit { border-left: 4px solid #C0392B; }
+  .finding.med  { border-left: 4px solid #D97557; }
+  .finding.low  { border-left: 4px solid #9AA7B8; }
+  .ftop { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin-bottom: 6px; }
+  .ftitle { font-size: 17px; font-weight: 700; }
+  .tag { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; padding: 3px 9px; border-radius: 3px; white-space: nowrap; }
+  .tag.crit { background: #C0392B; color: #fff; }
+  .tag.med  { background: #D97557; color: #fff; }
+  .tag.low  { background: #EDF1F6; color: #43526B; }
+  .tag.nr   { background: #00132F; color: #fff; }
+  .finding p { margin: 6px 0; font-size: 15px; }
+  .finding .fix { font-weight: 500; }
+  .finding .fix::before { content: "Fix: "; color: #D97557; font-weight: 700; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13.5px; background: #F4F6F9; padding: 2px 6px; border-radius: 3px; }
+  .clean { background: #F5F8F5; border-radius: 8px; padding: 20px 24px; }
+  .clean ul { margin: 0; padding-left: 20px; }
+  .clean li { margin-bottom: 8px; font-size: 15px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 14.5px; }
+  th { text-align: left; font-weight: 700; padding: 10px 12px; border-bottom: 2px solid #00132F; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+  td { padding: 9px 12px; border-bottom: 1px solid #EDF1F6; vertical-align: top; }
+  td.st { white-space: nowrap; font-weight: 500; }
+  .ok { color: #2E7D46; } .na { color: #8895A7; } .warn { color: #C0392B; }
+  .foot { margin-top: 50px; padding-top: 18px; border-top: 1px solid #E3E8EF; font-size: 13px; color: #6B7A90; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="eyebrow">Exposure audit · {{DD/MM/YYYY}}</div>
+  <h1>{{Question in his words}} <span class="accent">{{accent phrase}}</span></h1>
+  <p class="sub">{{One line on what was checked and against what.}}</p>
+
+  <div class="verdict">
+    <p>{{The bottom line in one sentence — how many items bite, and what the real exposure is.}}</p>
+    <p>{{One supporting sentence: what does not apply and why, plus what came back clean.}}</p>
+  </div>
+
+  <h2><span class="num">Do now</span> — {{n}} things</h2>
+  <p class="h2note">Ranked by real exposure. Live credentials outrank everything else.</p>
+
+  <!-- One block per finding. crit / med / low, tag matching. NOT RUN uses tag.nr. -->
+  <div class="finding crit">
+    <div class="ftop">
+      <span class="ftitle">1. {{What is wrong, stated as a fact}}</span>
+      <span class="tag crit">Critical</span>
+    </div>
+    <p>{{The evidence — file path, what the command returned, redacted key prefix.}}</p>
+    <p>{{Why it matters in his terms. What is the downside if it goes wrong.}}</p>
+    <p class="fix">{{A specific action. If order matters, say why.}}</p>
+  </div>
+
+  <h2><span class="num">Later</span> — {{n}}, none urgent</h2>
+  <p class="h2note">{{Why these can wait — local-only, low impact.}}</p>
+
+  <div class="finding low">
+    <div class="ftop">
+      <span class="ftitle">{{n}}. {{Finding}}</span>
+      <span class="tag low">Low</span>
+    </div>
+    <p>{{Evidence, and the reason the severity is capped.}}</p>
+    <p class="fix">{{Action, or "Nothing, while X stays true."}}</p>
+  </div>
+
+  <h2><span class="num">Clean</span> — verified this session</h2>
+  <p class="h2note">Each of these was checked with a command, not assumed.</p>
+
+  <div class="clean">
+    <ul>
+      <li><strong>{{What passed.}}</strong> {{The method — which command, what scope, what it returned.}}</li>
+    </ul>
+  </div>
+
+  <h2><span class="num">All 20</span>, item by item</h2>
+  <p class="h2note">{{How many are N/A and the single reason why.}}</p>
+
+  <table>
+    <tr><th style="width:38px">#</th><th>Vulnerability</th><th style="width:110px">Status</th><th>Why</th></tr>
+    <tr><td>1</td><td>{{item}}</td><td class="st ok">Clean</td><td>{{reason}}</td></tr>
+    <tr><td>2</td><td>{{item}}</td><td class="st warn">Flagged</td><td>{{reason, pointing at the finding number}}</td></tr>
+    <tr><td>3</td><td>{{item}}</td><td class="st na">N/A</td><td>{{the reason it cannot apply}}</td></tr>
+  </table>
+
+  <p class="foot">
+    Method: {{the actual commands and tools used}}.<br>
+    Not run: {{every check that did not complete, with the reason}}. No secret value is printed in this report.
+  </p>
+
+</div>
+</body>
+</html>
