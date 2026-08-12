@@ -117,6 +117,14 @@ Three states, and they are not interchangeable:
 An audit that quietly turns a stalled read into a clean result is worse than no audit,
 because the user will act on it.
 
+## Credit
+
+The twenty-item list in `references/checklist-20.md` comes from **@murphmaxxing** —
+https://www.instagram.com/reel/Db1VtFryvbR/, posted 9 August 2026. Full credit to them for
+identifying the twenty issues. The scoping method, the three exposures the list does not
+cover, the redaction rule, the NOT RUN discipline and `scripts/scan.sh` are additions on
+top of it.
+
 ## Scope and limits
 
 - Built and tested on macOS. `lsof` and the synced-folder defaults are macOS shaped;

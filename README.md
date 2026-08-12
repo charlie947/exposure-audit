@@ -6,6 +6,12 @@ There are twenty classic ways an AI-built app gets hacked. Run all twenty agains
 
 The exposure that actually turns up is a different shape: **live credentials in the wrong place**, and **things you switched off that are still switched on somewhere**. This skill scopes your surface first, then scores the checklist against it, so you spend the audit on the things that can genuinely cost you money.
 
+## Credit
+
+The twenty-item vulnerability list at the heart of this skill comes from **[@murphmaxxing](https://www.instagram.com/murphmaxxing/)** — [this reel](https://www.instagram.com/reel/Db1VtFryvbR/), posted 9 August 2026. Full credit to them for identifying the twenty issues and putting them in front of people who needed to hear it. Go and follow them.
+
+What this repo adds is the method around that list: scoping the surface before scoring the checklist, the three exposures the list does not cover, the never-print-a-secret rule, NOT RUN as a first-class verdict, and the sweep script that runs it all against a real machine.
+
 ## What it catches that the lists miss
 
 1. **Live keys inside cloud-synced folders.** A `.env` in Drive, iCloud, Dropbox or OneDrive was never committed to git and is still copied to a second system with its own sharing rules and version history.
