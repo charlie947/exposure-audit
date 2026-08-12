@@ -120,12 +120,40 @@ done
 hdr "PHASE 2 — credentials (where the real findings live)"
 
 hdr "2a. secrets committed to git"
+# Capture each git call's own exit status BEFORE piping into grep. Piping first
+# throws the status away, so a read that hit the alarm (142) or a corrupt ref
+# (128) returns empty output and reads exactly like a clean repo. That is the one
+# failure this whole audit is built to avoid, so a stalled read must become
+# NOTRUN, never silence.
 COMMITTED=0
+SCANNED_2A=0
+NOTRUN_2A=0
 for r in ${REPOS[@]+"${REPOS[@]}"}; do
   name=$(basename "$r")
-  tracked=$(cap 40 git -C "$r" ls-files | grep -iE '(^|/)\.env($|\.[a-z]+$)' | grep -v '\.example$' | head -5)
-  history=$(cap 60 git -C "$r" log --all --diff-filter=A --name-only --pretty=format: \
-            | grep -iE '(^|/)\.env($|\.[a-z]+$)' | grep -v '\.example$' | sort -u | head -5)
+
+  raw_tracked=$(cap 40 git -C "$r" ls-files 2>/dev/null); rc_tracked=$?
+  if [ "$rc_tracked" -ne 0 ]; then
+    say "NOTRUN: $name working tree read did not complete (git ls-files exit $rc_tracked; 142 = timed out, 128 = git error such as a corrupt ref). Retry with a longer guard, or fix the repo."
+    NOTRUN_2A=1
+    continue
+  fi
+  tracked=$(printf '%s\n' "$raw_tracked" | grep -iE '(^|/)\.env($|\.[a-z]+$)' | grep -v '\.example$' | head -5)
+
+  raw_history=$(cap 60 git -C "$r" log --all --diff-filter=A --name-only --pretty=format: 2>/dev/null); rc_history=$?
+  if [ "$rc_history" -ne 0 ]; then
+    # A full-history walk stalls on large repos inside a cloud-synced folder. A
+    # pathspec-limited query answers the same question for a fraction of the work,
+    # so try that before giving up on the repo.
+    raw_history=$(cap 90 git -C "$r" log --all --name-only --pretty=format: -- '.env' '**/.env' '*.env' 2>/dev/null); rc_history=$?
+    if [ "$rc_history" -ne 0 ]; then
+      say "NOTRUN: $name git history was not scanned (--diff-filter=A walk and pathspec fallback both exit $rc_history; 142 = timed out, 128 = git error such as a corrupt ref). This repo is UNVERIFIED for committed secrets."
+      NOTRUN_2A=1
+      continue
+    fi
+  fi
+  history=$(printf '%s\n' "$raw_history" | grep -iE '(^|/)\.env($|\.[a-z]+$)' | grep -v '\.example$' | sort -u | head -5)
+
+  SCANNED_2A=$((SCANNED_2A + 1))
   if [ -n "$tracked" ]; then
     say "FINDING: $name tracks a real .env RIGHT NOW: $(printf '%s' "$tracked" | tr '\n' ' ')"
     COMMITTED=1
@@ -135,7 +163,13 @@ for r in ${REPOS[@]+"${REPOS[@]}"}; do
     COMMITTED=1
   fi
 done
-[ "$COMMITTED" -eq 0 ] && say "CLEAN: no real .env is tracked or has ever been committed in any repo (checked working tree + full history with --diff-filter=A across ${#REPOS[@]} repos)"
+if [ "$COMMITTED" -eq 0 ]; then
+  if [ "$NOTRUN_2A" -eq 1 ]; then
+    say "CLEAN: no real .env is tracked or has ever been committed in the $SCANNED_2A of ${#REPOS[@]} repos that completed (working tree + history). The repos above marked NOTRUN are NOT covered by this line."
+  else
+    say "CLEAN: no real .env is tracked or has ever been committed in any repo (checked working tree + full history across all ${#REPOS[@]} repos)"
+  fi
+fi
 
 hdr "2b. live keys inside public repos — working tree AND every commit"
 # History matters more than the working tree. A key deleted in a later commit is
