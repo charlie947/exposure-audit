@@ -222,7 +222,10 @@ elif [ -n "$DRIVE_ENVS" ]; then
       continue
     fi
     names=$(printf '%s' "$body" | grep -vE '^\s*#|^\s*$' | tr '\n' ' ')
-    if printf '%s' "$body" | grep -qE 'sk-ant-|sk-proj-|pdl_liv|sk_live_|apify_api_|ghp_|AIza|ntn_|AKIA'; then
+    # Match against the raw file, not the redacted body: the 7-char prefix cuts
+    # sk_live_, sk-proj- and apify_api_ short, which reported live keys CLEAN.
+    # grep -q prints nothing, so no secret reaches the output.
+    if cap 30 grep -qE 'sk-ant-|sk-proj-|pdl_liv|sk_live_|apify_api_|ghp_|AIza|ntn_|AKIA' "$f"; then
       say "FINDING: live-format key in cloud-synced $f — $names"
     else
       say "CLEAN: $f is cloud-synced but holds no live-format key — $names"
