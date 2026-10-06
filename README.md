@@ -22,7 +22,7 @@ It also checks git history, not just the working tree. Deleting a key out of you
 
 ## What it never does
 
-- **Never prints a secret value.** Variable name plus a 7-character prefix is enough to prove a key is real and live-format.
+- **Never prints a secret value.** A variable name plus a known key prefix (sk-ant-, AKIA, sk_live) proves a key is live-format. For any other value, the report prints only its length.
 - **Never calls a state-changing endpoint to test it.** A route that drains a queue destroys real data the moment you probe it.
 - **Never follows redirects.** A dead page that redirects to a homepage returns 200 and reads as alive.
 - **Never fixes anything.** It reports. Revoking a key and deleting a deployment are your calls, and some are irreversible.

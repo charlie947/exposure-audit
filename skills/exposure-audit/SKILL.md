@@ -43,12 +43,22 @@ SYNC_DIRS="$HOME/Desktop $HOME/Dropbox" \
 bash skills/exposure-audit/scripts/scan.sh
 ```
 
-Takes 3-6 minutes. Writes a plain-text findings file to a temp path and prints it. Every
-line is prefixed with a marker (`FINDING:`, `CLEAN:`, `NOTRUN:`, `SCOPE:`) so you can
-read it straight into the report without re-deriving anything.
+Takes 3-6 minutes. Writes a plain-text findings file and prints it. The first argument is
+the findings-file path (`bash skills/exposure-audit/scripts/scan.sh ~/exposure-findings.txt`).
+Leave it out and the file goes to a temp path. Every line is prefixed with a marker
+(`FINDING:`, `CLEAN:`, `NOTRUN:`, `SCOPE:`) so you can read it straight into the report
+without re-deriving anything.
 
-It never prints a secret value. Where it needs to prove a key is live-format, it prints
-the variable name and the first 7 characters only. Keep that discipline in everything
+It finds repos up to three folders below your home folder or a synced folder
+(`~/code/clients/acme-app` counts as three). Public repos you own get a full history scan for
+live keys, and so does every repo with no remote, because making it public later publishes
+all of its history. That makes the sweep the check to run before you make a repo public.
+Key hits in a repo print as a location only (file and line, or commit, file and line),
+never the line itself.
+
+It never prints a secret value. A variable name plus a known key prefix (sk-ant-, AKIA,
+sk_live) proves a key is live-format. For any other value, the report prints only its
+length. Keep that discipline in everything
 you write afterwards — the report gets read on a screen, sometimes a shared one.
 
 **3. Map the findings against `references/checklist-20.md`.**
@@ -85,12 +95,14 @@ the payment provider's dashboard, then delete the file" beats "consider rotating
 credentials". Where the order matters, say why — revoking before deleting matters because
 deleting a synced file locally leaves the key in that service's version history.
 
-Open the finished file in the browser and print the absolute path on its own line.
+Open the finished file in the browser (or render it headless and look at the image) and
+print the absolute path on its own line.
 
 ## Rules that stop this audit doing harm
 
-- **Never print a secret value.** Variable name plus a 7-character prefix is enough to
-  prove a key is real and live-format. The full string is never needed to make the point.
+- **Never print a secret value.** A variable name plus a known key prefix (sk-ant-, AKIA,
+  sk_live) proves a key is live-format. For any other value, the report prints only its
+  length. The full string is never needed to make the point.
 - **Never call an endpoint that changes state to test it.** A queue-draining route like
   `GET /messages` destroys real data the moment you probe it. Probe `/health` instead and
   reason about the rest. Say in the report that you inferred it rather than tested it.
@@ -132,5 +144,6 @@ top of it.
 - Requires `git`, `curl` and `perl`. Uses the GitHub CLI (`gh`) for repository visibility
   and `npm` for the dependency check. Each is optional — the sweep marks anything it
   cannot run as `NOTRUN:` rather than skipping it silently.
-- It reads. It never writes to a repo, never revokes anything, never calls a
-  state-changing endpoint.
+- It writes nothing except the findings file and npm's own cache and log files under
+  ~/.npm. It never writes to a repo, never revokes
+  anything, never calls a state-changing endpoint.
