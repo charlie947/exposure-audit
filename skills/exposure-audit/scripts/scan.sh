@@ -9,7 +9,10 @@
 #   NOTRUN:  a check that did not complete, with the reason
 #
 # Never prints a secret value. Keys are shown as NAME + 7-char prefix only.
-# Never calls a state-changing endpoint. Never follows redirects. Never writes anything.
+# Never calls a state-changing endpoint. Never follows redirects. Never writes anything
+# except the findings file.
+#
+# Usage: scan.sh [findings-file]   (default: a timestamped file in $TMPDIR)
 #
 # Optional inputs:
 #   DOMAINS="yoursite.com another.com"   domains to check for exposed keys and headers
@@ -63,19 +66,30 @@ hdr "PHASE 1 — scope"
 # checklist item cannot be scored as a finding or a non-event.
 
 REPOS=()
-for r in "$HOME"/*; do
-  [ -d "$r/.git" ] && REPOS+=("$r")
-done
+# Repos sit in nested folders (~/code/client/app), so look three levels down, not one.
+# Library and hidden folders are skipped: they hold caches and tool clones, and are slow
+# to walk. Synced folders are pruned here and walked below with their own time limit.
+find_repos() { # find_repos SECS DIR [extra prune tests...]
+  local secs="$1" dir="$2"; shift 2
+  cap "$secs" find "$dir" -mindepth 1 -maxdepth 3 \( "$@" -name Library -o -name node_modules \
+    -o \( -name '.*' -not -name .git \) \) -prune -o -type d -name .git -print -prune
+}
+PRUNE=()
+for d in ${SYNC[@]+"${SYNC[@]}"}; do PRUNE+=(-path "$d" -o); done
+ALL_GIT=$(find_repos 90 "$HOME" ${PRUNE[@]+"${PRUNE[@]}"})
+if [ $? -eq 142 ]; then
+  say "NOTRUN: repo search under $HOME (3 levels deep) timed out after 90s. Repos found before the limit are listed below. Others may be missing."
+fi
 # Synced folders are slow to walk because the client materialises files on demand,
 # so cap each one and report when it does not finish rather than reporting fewer repos.
 for d in ${SYNC[@]+"${SYNC[@]}"}; do
-  FOUND=$(cap 45 bash -c 'for r in "$1"/*; do [ -d "$r/.git" ] && echo "$r"; done' _ "$d")
+  FOUND=$(find_repos 45 "$d")
   if [ $? -eq 142 ]; then
-    say "NOTRUN: repo enumeration under $d timed out after 45s (cloud client materialising files). Home-directory repos below are complete."
-  else
-    while IFS= read -r r; do [ -n "$r" ] && REPOS+=("$r"); done <<< "$FOUND"
+    say "NOTRUN: repo search under $d timed out after 45s (cloud client materialising files). Repos found before the limit are still listed."
   fi
+  ALL_GIT="$ALL_GIT"$'\n'"$FOUND"
 done
+while IFS= read -r g; do [ -n "$g" ] && REPOS+=("${g%/.git}"); done <<< "$(printf '%s\n' "$ALL_GIT" | sort -u)"
 
 say "SCOPE: ${#REPOS[@]} git repos found"
 # Whose repos count. A clone of someone else's public repo cannot leak your keys —
@@ -86,13 +100,15 @@ if [ -z "$OWNERS" ]; then
   say "NOTRUN: could not resolve a GitHub login (gh missing or not authenticated), so every repo is treated as third-party and none gets the deep history scan. Fix: run 'gh auth login', or set OWNERS=\"your-login\"."
 fi
 PUBLIC_REPOS=()
+LOCAL_REPOS=()
 for r in ${REPOS[@]+"${REPOS[@]}"}; do
   # Every git call here has to be time-capped. A repo stalled by a cloud client will
   # hang `git remote get-url` indefinitely, which is how the first run of this script
   # died silently two thirds of the way through.
   url=$(cap 15 git -C "$r" remote get-url origin)
   if [ -z "$url" ]; then
-    say "SCOPE:   $(basename "$r") — no remote (local only, or unreadable)"
+    say "SCOPE:   $(basename "$r"): no remote (local only, or unreadable). Gets the deep history scan, because making it public later publishes that history"
+    LOCAL_REPOS+=("$r")
     continue
   fi
   slug=$(printf '%s' "$url" | sed -E 's#.*github.com[:/]##; s/\.git$//')
@@ -104,7 +120,7 @@ for r in ${REPOS[@]+"${REPOS[@]}"}; do
   say "SCOPE:   $(basename "$r") — $vis — $slug ($mine)"
   [ "$vis" = "PUBLIC" ] && [ "$mine" = "yours" ] && PUBLIC_REPOS+=("$r")
 done
-say "SCOPE: ${#PUBLIC_REPOS[@]} repos are BOTH public AND yours — only these get the deep history scan"
+say "SCOPE: ${#PUBLIC_REPOS[@]} repos are BOTH public AND yours, and ${#LOCAL_REPOS[@]} have no remote. Only these get the deep history scan"
 
 hdr "listening services"
 # Anything bound to * is reachable by every device on the same network.
@@ -171,27 +187,38 @@ if [ "$COMMITTED" -eq 0 ]; then
   fi
 fi
 
-hdr "2b. live keys inside public repos — working tree AND every commit"
+hdr "2b. live keys in public and local-only repos, working tree AND every commit"
 # History matters more than the working tree. A key deleted in a later commit is
-# still served by GitHub at its original blob URL forever.
-if [ "${#PUBLIC_REPOS[@]}" -eq 0 ]; then
-  say "CLEAN: no public repos to scan"
-else
-  for r in ${PUBLIC_REPOS[@]+"${PUBLIC_REPOS[@]}"}; do
-    name=$(basename "$r")
-    tree_hit=$(git -C "$r" grep -nEI "$KEYPAT" -- . 2>/dev/null | head -5)
-    revs=$(git -C "$r" rev-list --all 2>/dev/null | head -300)
-    hist_hit=""
-    [ -n "$revs" ] && hist_hit=$(cap 90 bash -c "cd '$r' && git grep -nEI '$KEYPAT' $(printf '%s ' $revs) 2>/dev/null | head -5")
-    if [ -n "$tree_hit" ]; then
-      say "FINDING: PUBLIC repo $name has live-format key material in the working tree: $(printf '%s' "$tree_hit" | cut -c1-90 | head -3)"
-    elif [ -n "$hist_hit" ]; then
-      say "FINDING: PUBLIC repo $name has live-format key material in git history: $(printf '%s' "$hist_hit" | cut -c1-90 | head -3)"
-    else
-      say "CLEAN: PUBLIC repo $name — no key material in working tree or history (scanned 11 live key formats across up to 300 commits)"
-    fi
-  done
+# still served by GitHub at its original blob URL forever. A repo with no remote is
+# scanned too, because making it public later publishes all of that history.
+# Only locations are printed (file:line, or commit:file:line). The matched line holds
+# the key itself, so it never reaches the output. git grep exits 1 for no match, so
+# any higher exit status is a scan that did not complete.
+deep_scan() { # deep_scan REPO LABEL
+  local r="$1" kind="$2" name revs rc_r tree_hit rc_t hist_hit rc_h
+  name=$(basename "$r")
+  revs=$(cap 30 git -C "$r" rev-list --all --max-count=300); rc_r=$?
+  tree_hit=$(cap 60 git -C "$r" grep -nIE -e "$KEYPAT" -- .); rc_t=$?
+  hist_hit=""; rc_h=1
+  if [ -n "$revs" ]; then
+    # $revs is unquoted on purpose: one argument per commit.
+    hist_hit=$(cap 90 git -C "$r" grep -nIE -e "$KEYPAT" $revs --); rc_h=$?
+  fi
+  if [ -n "$tree_hit" ]; then
+    say "FINDING: $kind $name has live-format key material in the working tree at (file:line): $(printf '%s\n' "$tree_hit" | cut -d: -f1-2 | head -3 | tr '\n' ' ')"
+  elif [ -n "$hist_hit" ]; then
+    say "FINDING: $kind $name has live-format key material in git history at (commit:file:line): $(printf '%s\n' "$hist_hit" | cut -d: -f1-3 | head -3 | tr '\n' ' ')"
+  elif [ "$rc_r" -ne 0 ] || [ "$rc_t" -gt 1 ] || [ "$rc_h" -gt 1 ]; then
+    say "NOTRUN: $kind $name was not fully scanned (rev-list exit $rc_r, tree grep exit $rc_t, history grep exit $rc_h. 142 = timed out). It is UNVERIFIED for key material."
+  else
+    say "CLEAN: $kind $name: no key material in working tree or history (scanned 13 live key formats across up to 300 commits)"
+  fi
+}
+if [ "${#PUBLIC_REPOS[@]}" -eq 0 ] && [ "${#LOCAL_REPOS[@]}" -eq 0 ]; then
+  say "CLEAN: no public or local-only repos to scan"
 fi
+for r in ${PUBLIC_REPOS[@]+"${PUBLIC_REPOS[@]}"}; do deep_scan "$r" "PUBLIC repo"; done
+for r in ${LOCAL_REPOS[@]+"${LOCAL_REPOS[@]}"}; do deep_scan "$r" "LOCAL-ONLY repo (no remote)"; done
 
 hdr "2c. .env files in cloud-synced locations"
 # This is the one the published checklists miss. A .env that was never committed to
@@ -200,35 +227,49 @@ hdr "2c. .env files in cloud-synced locations"
 DRIVE_ENVS=""
 SYNC_STALLED=0
 for d in ${SYNC[@]+"${SYNC[@]}"}; do
-  hits=$(cap 60 find "$d" -maxdepth 3 -name ".env" -not -path "*/node_modules/*")
+  hits=$(cap 60 find "$d" -maxdepth 3 \( -name '.env' -o -name '.env.*' \) -not -name '*.example' -not -path "*/node_modules/*")
   if [ $? -eq 142 ]; then
     SYNC_STALLED=1
-    say "NOTRUN: .env search under $d timed out after 60s (cloud client). Re-run just this step: find '$d' -maxdepth 3 -name .env -not -path '*/node_modules/*'"
+    say "NOTRUN: .env search under $d timed out after 60s (cloud client). Re-run just this step: find '$d' -maxdepth 3 -name '.env*' -not -name '*.example' -not -path '*/node_modules/*'"
     continue
   fi
   [ -n "$hits" ] && DRIVE_ENVS="$DRIVE_ENVS$hits\n"
 done
 DRIVE_ENVS=$(printf '%b' "$DRIVE_ENVS" | grep -v '^$')
 if [ -z "$DRIVE_ENVS" ] && [ "$SYNC_STALLED" -eq 0 ]; then
-  say "CLEAN: no .env files in any cloud-synced folder (searched ${#SYNC[@]} trees to depth 3)"
+  say "CLEAN: no .env or .env.* files in any cloud-synced folder (searched ${#SYNC[@]} trees to depth 3)"
 elif [ -n "$DRIVE_ENVS" ]; then
   while IFS= read -r f; do
     [ -z "$f" ] && continue
     # Print variable names and a 7-char prefix only. Enough to prove a key is
-    # live-format, never enough to use it.
-    body=$(cap 30 sed -E 's/=(.{0,7}).*/= \1…[REDACTED]/' "$f")
-    if [ $? -eq 142 ] || [ -z "$body" ]; then
+    # live-format, never enough to use it. Only NAME=value lines are printed. The
+    # lines inside a multi-line value (a PEM private key, say) are the secret itself,
+    # and base64 padding puts an "=" in them, so they are skipped by tracking the
+    # open quote or BEGIN block rather than by looking for "=".
+    body=$(cap 30 awk '
+      inpem { if ($0 ~ /-----END/) { inpem = 0; if (inq && index($0, q)) inq = 0 }; next }
+      inq   { if (index($0, q)) inq = 0; next }
+      /^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*=/ {
+        i = index($0, "="); val = substr($0, i + 1); v = val; sub(/^[[:space:]]+/, "", v)
+        c = substr(v, 1, 1)
+        if ((c == "\"" || c == "\047") && index(substr(v, 2), c) == 0) { inq = 1; q = c }
+        if (val ~ /-----BEGIN/ && val !~ /-----END/) inpem = 1
+        print substr($0, 1, i) " " substr(val, 1, 7) "…[REDACTED]"
+      }' "$f"); rc_body=$?
+    if [ "$rc_body" -ne 0 ] || { [ -z "$body" ] && [ ! -s "$f" ]; }; then
       say "NOTRUN: $f exists but could not be read in 30s (the cloud client has not materialised it). Open it manually — treat every key inside as sync-exposed until seen."
       continue
     fi
     names=$(printf '%s' "$body" | grep -vE '^\s*#|^\s*$' | tr '\n' ' ')
-    # Match against the raw file, not the redacted body: the 7-char prefix cuts
-    # sk_live_, sk-proj- and apify_api_ short, which reported live keys CLEAN.
-    # grep -q prints nothing, so no secret reaches the output.
-    if cap 30 grep -qE 'sk-ant-|sk-proj-|pdl_liv|sk_live_|apify_api_|ghp_|AIza|ntn_|AKIA' "$f"; then
-      say "FINDING: live-format key in cloud-synced $f — $names"
+    # Match the full KEYPAT against the raw file, never the redacted text, so PEM
+    # keys, rk_live_, xoxb- and github_pat_ count too. grep -q prints nothing.
+    cap 30 grep -qE "$KEYPAT" "$f"; rc_key=$?
+    if [ "$rc_key" -eq 0 ]; then
+      say "FINDING: live-format key in cloud-synced $f: $names"
+    elif [ "$rc_key" -eq 1 ]; then
+      say "CLEAN: $f is cloud-synced but holds no live-format key: $names"
     else
-      say "CLEAN: $f is cloud-synced but holds no live-format key — $names"
+      say "NOTRUN: $f could not be matched against the key formats (grep exit $rc_key. 142 = timed out). Treat it as sync-exposed until checked."
     fi
   done <<< "$DRIVE_ENVS"
 fi
@@ -236,12 +277,22 @@ fi
 hdr "2d. keys inlined in MCP config"
 # A key written into an MCP server's command string prints in full on every
 # `claude mcp list`, including over someone's shoulder or on a shared screen.
-inline=$(grep -oE '"(command|args)":[^]]{0,400}' "$HOME/.claude.json" 2>/dev/null \
-         | grep -oiE "$KEYPAT" | sort -u | head -3)
-if [ -n "$inline" ]; then
-  say "FINDING: ~/.claude.json has key material inline in an MCP command string (prints in full on every 'claude mcp list')"
+# Each grep's exit status is kept. macOS grep rejects a repetition count above 255,
+# and that error, hidden by 2>/dev/null, used to read as CLEAN.
+CJ="$HOME/.claude.json"
+if [ ! -f "$CJ" ]; then
+  say "CLEAN: no ~/.claude.json, so there are no MCP command strings to check"
 else
-  say "CLEAN: ~/.claude.json has no key material inline in MCP command strings"
+  cmds=$(cap 30 grep -oE '"(command|args)":[^]]*' "$CJ"); rc_cmd=$?
+  rc_key=1
+  if [ "$rc_cmd" -eq 0 ]; then grep -qiE "$KEYPAT" <<< "$cmds"; rc_key=$?; fi
+  if [ "$rc_key" -eq 0 ]; then
+    say "FINDING: ~/.claude.json has key material inline in an MCP command string (prints in full on every 'claude mcp list')"
+  elif [ "$rc_cmd" -gt 1 ] || [ "$rc_key" -gt 1 ]; then
+    say "NOTRUN: ~/.claude.json could not be searched (grep exit $rc_cmd then $rc_key. 142 = timed out). Not checked, so not clean."
+  else
+    say "CLEAN: ~/.claude.json has no key material inline in MCP command strings"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -283,27 +334,49 @@ done
 hdr "abandoned deployments"
 # A product that was shut down is only shut down if the deployment is gone too.
 # A linked Vercel project can still be live with its environment variables attached.
+VERCEL=0
 for r in ${REPOS[@]+"${REPOS[@]}"}; do
   if [ -f "$r/.vercel/project.json" ]; then
     pj=$(cap 15 cat "$r/.vercel/project.json")
+    VERCEL=1
     say "FINDING: $(basename "$r") is still linked to a Vercel project — verify it is not deployed with env vars attached: $(printf '%s' "$pj" | cut -c1-160)"
   fi
 done
+if [ "$VERCEL" -eq 0 ]; then
+  say "CLEAN: none of the ${#REPOS[@]} repos is linked to a Vercel project (no .vercel/project.json)"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "PHASE 4 — code-level checks and dependencies"
 
 hdr "unauthenticated API routes"
+ROUTES_SEEN=0
+ROUTE_FINDING=0
+ROUTE_NOTRUN=0
 for r in ${REPOS[@]+"${REPOS[@]}"}; do
   routes=$(cap 30 find "$r" -path "*/api/*" -name "route.ts" -not -path "*/node_modules/*")
+  if [ $? -eq 142 ]; then
+    say "NOTRUN: API route search in $(basename "$r") timed out after 30s"
+    ROUTE_NOTRUN=1
+  fi
   [ -z "$routes" ] && continue
   while IFS= read -r f; do
     [ -z "$f" ] && continue
+    ROUTES_SEEN=$((ROUTES_SEEN + 1))
     if ! grep -qiE "auth|session|getToken|Authorization|x-api-key" "$f" 2>/dev/null; then
-      say "FINDING: ${f#$HOME/} has no auth check (severity depends on whether the app is deployed — see PHASE 1 scope)"
+      say "FINDING: ${f#$HOME/} has no auth check (severity depends on whether the app is deployed, see PHASE 1 scope)"
+      ROUTE_FINDING=1
     fi
   done <<< "$routes"
 done
+if [ "$ROUTE_FINDING" -eq 0 ]; then
+  if [ "$ROUTES_SEEN" -eq 0 ]; then
+    say "CLEAN: no API route files (api/**/route.ts) in any of the ${#REPOS[@]} repos"
+  else
+    say "CLEAN: all $ROUTES_SEEN API route files mention an auth check (auth, session, token or API key)"
+  fi
+  [ "$ROUTE_NOTRUN" -eq 1 ] && say "NOTRUN: the repos marked NOTRUN above are not covered by that CLEAN line"
+fi
 
 hdr "CORS wildcards and unsigned webhooks"
 cors=$(grep -rlE "Access-Control-Allow-Origin['\"]?\s*[:,]\s*['\"]\*" "$HOME"/*/src 2>/dev/null | head -3)
@@ -320,14 +393,26 @@ else
 fi
 
 hdr "dependency vulnerabilities"
+DEPS_CHECKED=0
+DEPS_FINDING=0
+DEPS_NOTRUN=0
 for r in ${REPOS[@]+"${REPOS[@]}"}; do
   [ -f "$r/package.json" ] || continue
   res=$(cap 70 npm audit --prefix "$r" --json 2>/dev/null \
-        | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const v=JSON.parse(s).metadata.vulnerabilities;if(v.critical+v.high>0)console.log('crit '+v.critical+' high '+v.high+' mod '+v.moderate);}catch(e){}})")
-  if [ -n "$res" ]; then
-    say "FINDING: $(basename "$r") — $res"
-  fi
+        | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const v=JSON.parse(s).metadata.vulnerabilities;console.log(v.critical+v.high>0?'crit '+v.critical+' high '+v.high+' mod '+v.moderate:'none');}catch(e){console.log('unreadable')}})")
+  case "$res" in
+    crit*) say "FINDING: $(basename "$r"): $res"; DEPS_FINDING=1 ;;
+    none)  DEPS_CHECKED=$((DEPS_CHECKED + 1)) ;;
+    *)     say "NOTRUN: $(basename "$r") npm audit gave no readable result (npm or node missing, no lockfile, or offline)"; DEPS_NOTRUN=1 ;;
+  esac
 done
+if [ "$DEPS_FINDING" -eq 0 ]; then
+  if [ "$DEPS_CHECKED" -gt 0 ]; then
+    say "CLEAN: npm audit found no critical or high vulnerabilities (repos audited: $DEPS_CHECKED)"
+  elif [ "$DEPS_NOTRUN" -eq 0 ]; then
+    say "CLEAN: no repo has a package.json, so there are no npm dependencies to audit"
+  fi
+fi
 
 say ""
 say "### sweep complete — $OUT"

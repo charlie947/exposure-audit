@@ -9,7 +9,7 @@
       "name": "exposure-audit",
       "source": ".",
       "description": "A Claude skill that audits your own setup and tells you which API keys you have left lying around. Scopes your surface first, then runs the twenty classic vibe-coding vulnerability checks against it. Catches the three things published lists miss: live keys inside cloud-synced folders, unrevoked keys from products you shut down, and abandoned deployments still holding environment variables. Never prints a secret value, never fixes anything, and reports NOT RUN instead of guessing.",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "metadata": {
         "categories": [
           "security"

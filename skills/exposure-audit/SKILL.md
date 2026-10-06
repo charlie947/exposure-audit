@@ -43,9 +43,17 @@ SYNC_DIRS="$HOME/Desktop $HOME/Dropbox" \
 bash skills/exposure-audit/scripts/scan.sh
 ```
 
-Takes 3-6 minutes. Writes a plain-text findings file to a temp path and prints it. Every
-line is prefixed with a marker (`FINDING:`, `CLEAN:`, `NOTRUN:`, `SCOPE:`) so you can
-read it straight into the report without re-deriving anything.
+Takes 3-6 minutes. Writes a plain-text findings file and prints it. The first argument is
+the findings-file path (`bash skills/exposure-audit/scripts/scan.sh ~/exposure-findings.txt`).
+Leave it out and the file goes to a temp path. Every line is prefixed with a marker
+(`FINDING:`, `CLEAN:`, `NOTRUN:`, `SCOPE:`) so you can read it straight into the report
+without re-deriving anything.
+
+It finds repos up to three folders deep. Public repos you own get a full history scan for
+live keys, and so does every repo with no remote, because making it public later publishes
+all of its history. That makes the sweep the check to run before you make a repo public.
+Key hits in a repo print as a location only (file and line, or commit, file and line),
+never the line itself.
 
 It never prints a secret value. Where it needs to prove a key is live-format, it prints
 the variable name and the first 7 characters only. Keep that discipline in everything
@@ -132,5 +140,5 @@ top of it.
 - Requires `git`, `curl` and `perl`. Uses the GitHub CLI (`gh`) for repository visibility
   and `npm` for the dependency check. Each is optional — the sweep marks anything it
   cannot run as `NOTRUN:` rather than skipping it silently.
-- It reads. It never writes to a repo, never revokes anything, never calls a
-  state-changing endpoint.
+- It writes nothing except the findings file. It never writes to a repo, never revokes
+  anything, never calls a state-changing endpoint.
