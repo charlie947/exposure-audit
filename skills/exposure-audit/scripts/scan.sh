@@ -40,7 +40,7 @@ cap() { local secs="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$secs" "$@" 2
 
 # Key formats worth catching. Deliberately anchored to live prefixes so that
 # placeholder values in .env.example files do not produce false alarms.
-KEYPAT='sk-ant-api[0-9]{2}-|sk-proj-[A-Za-z0-9_-]{20,}|apify_api_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xoxb-[0-9]{10,}|AIza[0-9A-Za-z_-]{30,}|ntn_[A-Za-z0-9]{20,}|pdl_(live|liv)[A-Za-z0-9_]{10,}|sk_live_[A-Za-z0-9]{20,}|rk_live_[A-Za-z0-9]{20,}|-----BEGIN (RSA|OPENSSH|EC|DSA)? ?PRIVATE KEY'
+KEYPAT='sk-ant-(api[0-9]{2}|oat[0-9]{2}|admin[0-9]{2})-|sk-proj-[A-Za-z0-9_-]{20,}|apify_api_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xoxb-[0-9]{10,}|AIza[0-9A-Za-z_-]{30,}|ntn_[A-Za-z0-9]{20,}|pdl_(live|liv)[A-Za-z0-9_]{10,}|sk_live_[A-Za-z0-9]{20,}|rk_live_[A-Za-z0-9]{20,}|-----BEGIN (RSA|OPENSSH|EC|DSA)? ?PRIVATE KEY'
 
 say "exposure-audit sweep — $(date '+%d/%m/%Y %H:%M %Z')"
 say "output: $OUT"
