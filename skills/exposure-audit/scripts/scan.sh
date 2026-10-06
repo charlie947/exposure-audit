@@ -8,9 +8,10 @@
 #   CLEAN:   a check that passed, with the method
 #   NOTRUN:  a check that did not complete, with the reason
 #
-# Never prints a secret value. Keys are shown as NAME + 7-char prefix only.
+# Never prints a secret value. A key is shown as NAME plus its known format prefix
+# (sk-ant-, AKIA, sk_live_). Any other value is shown as its length only.
 # Never calls a state-changing endpoint. Never follows redirects. Never writes anything
-# except the findings file.
+# except the findings file (npm audit writes its own cache and logs under ~/.npm).
 #
 # Usage: scan.sh [findings-file]   (default: a timestamped file in $TMPDIR)
 #
@@ -41,6 +42,9 @@ cap() { local secs="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$secs" "$@" 2
 # Key formats worth catching. Deliberately anchored to live prefixes so that
 # placeholder values in .env.example files do not produce false alarms.
 KEYPAT='sk-ant-(api[0-9]{2}|oat[0-9]{2}|admin[0-9]{2})-|sk-proj-[A-Za-z0-9_-]{20,}|apify_api_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xoxb-[0-9]{10,}|AIza[0-9A-Za-z_-]{30,}|ntn_[A-Za-z0-9]{20,}|pdl_(live|liv)[A-Za-z0-9_]{10,}|sk_live_[A-Za-z0-9]{20,}|rk_live_[A-Za-z0-9]{20,}|-----BEGIN (RSA|OPENSSH|EC|DSA)? ?PRIVATE KEY'
+# The non-secret start of each format above. A redacted value may show this much and
+# no more. Keep the two lists in step.
+KEYPREFIX='^(sk-ant-(api|oat|admin)[0-9][0-9]-|sk-proj-|apify_api_|ghp_|github_pat_|AKIA|xoxb-|AIza|ntn_|pdl_live?|sk_live_|rk_live_|-----BEGIN)'
 
 say "exposure-audit sweep — $(date '+%d/%m/%Y %H:%M %Z')"
 say "output: $OUT"
@@ -66,19 +70,20 @@ hdr "PHASE 1 — scope"
 # checklist item cannot be scored as a finding or a non-event.
 
 REPOS=()
-# Repos sit in nested folders (~/code/client/app), so look three levels down, not one.
+# Repos sit in nested folders (~/code/clients/app), so look for a .git up to four levels
+# down. That finds a repo up to three folders deep, not one.
 # Library and hidden folders are skipped: they hold caches and tool clones, and are slow
 # to walk. Synced folders are pruned here and walked below with their own time limit.
 find_repos() { # find_repos SECS DIR [extra prune tests...]
   local secs="$1" dir="$2"; shift 2
-  cap "$secs" find "$dir" -mindepth 1 -maxdepth 3 \( "$@" -name Library -o -name node_modules \
+  cap "$secs" find "$dir" -mindepth 1 -maxdepth 4 \( "$@" -name Library -o -name node_modules \
     -o \( -name '.*' -not -name .git \) \) -prune -o -type d -name .git -print -prune
 }
 PRUNE=()
 for d in ${SYNC[@]+"${SYNC[@]}"}; do PRUNE+=(-path "$d" -o); done
 ALL_GIT=$(find_repos 90 "$HOME" ${PRUNE[@]+"${PRUNE[@]}"})
 if [ $? -eq 142 ]; then
-  say "NOTRUN: repo search under $HOME (3 levels deep) timed out after 90s. Repos found before the limit are listed below. Others may be missing."
+  say "NOTRUN: repo search under $HOME (repos up to 3 folders deep) timed out after 90s. Repos found before the limit are listed below. Others may be missing."
 fi
 # Synced folders are slow to walk because the client materialises files on demand,
 # so cap each one and report when it does not finish rather than reporting fewer repos.
@@ -155,6 +160,18 @@ for r in ${REPOS[@]+"${REPOS[@]}"}; do
   fi
   tracked=$(printf '%s\n' "$raw_tracked" | grep -iE '(^|/)\.env($|\.[a-z]+$)' | grep -v '\.example$' | head -5)
 
+  # An untracked .env that .gitignore does not cover is one 'git add -A' away from
+  # being committed. An ignored one is the normal, safe place for keys.
+  raw_loose=$(cap 40 git -C "$r" ls-files --others --exclude-standard 2>/dev/null); rc_loose=$?
+  if [ "$rc_loose" -ne 0 ]; then
+    say "NOTRUN: $name untracked-file check did not complete (git ls-files --others exit $rc_loose; 142 = timed out). An un-ignored .env here is UNVERIFIED."
+  else
+    loose=$(printf '%s\n' "$raw_loose" | grep -iE '(^|/)\.env($|\.[a-z]+$)' | grep -v '\.example$' | head -5)
+    if [ -n "$loose" ]; then
+      say "FINDING: $name has a .env that is not tracked AND not in .gitignore, so one 'git add -A' commits it: $(printf '%s' "$loose" | tr '\n' ' ')"
+    fi
+  fi
+
   raw_history=$(cap 60 git -C "$r" log --all --diff-filter=A --name-only --pretty=format: 2>/dev/null); rc_history=$?
   if [ "$rc_history" -ne 0 ]; then
     # A full-history walk stalls on large repos inside a cloud-synced folder. A
@@ -204,14 +221,23 @@ deep_scan() { # deep_scan REPO LABEL
     # $revs is unquoted on purpose: one argument per commit.
     hist_hit=$(cap 90 git -C "$r" grep -nIE -e "$KEYPAT" $revs --); rc_h=$?
   fi
+  # The HEAD commit is the working tree again, so its hits are dropped from the
+  # history list. What is left is a key that rotating the current file will not remove.
+  head_rev=$(cap 15 git -C "$r" rev-parse HEAD)
+  [ -n "$head_rev" ] && [ -n "$hist_hit" ] && hist_hit=$(printf '%s\n' "$hist_hit" | grep -v "^$head_rev:")
+  found=0
   if [ -n "$tree_hit" ]; then
     say "FINDING: $kind $name has live-format key material in the working tree at (file:line): $(printf '%s\n' "$tree_hit" | cut -d: -f1-2 | head -3 | tr '\n' ' ')"
-  elif [ -n "$hist_hit" ]; then
+    found=1
+  fi
+  if [ -n "$hist_hit" ]; then
     say "FINDING: $kind $name has live-format key material in git history at (commit:file:line): $(printf '%s\n' "$hist_hit" | cut -d: -f1-3 | head -3 | tr '\n' ' ')"
-  elif [ "$rc_r" -ne 0 ] || [ "$rc_t" -gt 1 ] || [ "$rc_h" -gt 1 ]; then
-    say "NOTRUN: $kind $name was not fully scanned (rev-list exit $rc_r, tree grep exit $rc_t, history grep exit $rc_h. 142 = timed out). It is UNVERIFIED for key material."
-  else
-    say "CLEAN: $kind $name: no key material in working tree or history (scanned 13 live key formats across up to 300 commits)"
+    found=1
+  fi
+  if [ "$rc_r" -ne 0 ] || [ "$rc_t" -gt 1 ] || [ "$rc_h" -gt 1 ]; then
+    say "NOTRUN: $kind $name was not fully scanned (rev-list exit $rc_r, tree grep exit $rc_t, history grep exit $rc_h. 142 = timed out). Anything not listed above is UNVERIFIED for key material."
+  elif [ "$found" -eq 0 ]; then
+    say "CLEAN: $kind $name: no key material in tracked files or history (scanned 13 live key formats across up to 300 commits)"
   fi
 }
 if [ "${#PUBLIC_REPOS[@]}" -eq 0 ] && [ "${#LOCAL_REPOS[@]}" -eq 0 ]; then
@@ -241,21 +267,40 @@ if [ -z "$DRIVE_ENVS" ] && [ "$SYNC_STALLED" -eq 0 ]; then
 elif [ -n "$DRIVE_ENVS" ]; then
   while IFS= read -r f; do
     [ -z "$f" ] && continue
-    # Print variable names and a 7-char prefix only. Enough to prove a key is
-    # live-format, never enough to use it. Only NAME=value lines are printed. The
-    # lines inside a multi-line value (a PEM private key, say) are the secret itself,
-    # and base64 padding puts an "=" in them, so they are skipped by tracking the
-    # open quote or BEGIN block rather than by looking for "=".
-    body=$(cap 30 awk '
-      inpem { if ($0 ~ /-----END/) { inpem = 0; if (inq && index($0, q)) inq = 0 }; next }
-      inq   { if (index($0, q)) inq = 0; next }
-      /^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*=/ {
-        i = index($0, "="); val = substr($0, i + 1); v = val; sub(/^[[:space:]]+/, "", v)
-        c = substr(v, 1, 1)
+    # Print variable names only, plus a value's known key prefix (sk-ant-, AKIA,
+    # sk_live_) when it has one. Any other value prints as its length, because the
+    # first few characters of a short password are the password. The lines inside a
+    # multi-line value (a PEM private key, say) are the secret itself, and base64
+    # padding makes them look like NAME=value, so every line from -----BEGIN to
+    # -----END is skipped whether or not the value is quoted.
+    body=$(cap 30 awk -v kp="$KEYPREFIX" '
+      function show(v) {
+        sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v)
+        if (v ~ /^["\047]/) v = substr(v, 2)
+        if (v ~ /["\047]$/) v = substr(v, 1, length(v) - 1)
+        if (v == "") return "[empty]"
+        if (match(v, kp)) return substr(v, 1, RLENGTH) "…[REDACTED]"
+        return "[REDACTED, " length(v) " chars]"
+      }
+      {
+        if (inpem) { if ($0 ~ /-----END/) { inpem = 0; if (inq && index($0, q)) inq = 0 }; next }
+        if (inq)   { if (index($0, q)) inq = 0; next }
+        isname = ($0 ~ /^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/)
+        if (pend != "") {
+          if (!isname && $0 ~ /-----BEGIN/) print pend " -----BEGIN…[REDACTED, multi-line key]"
+          else print pend " [empty]"
+          pend = ""
+        }
+        if (!isname) { if ($0 ~ /-----BEGIN/ && $0 !~ /-----END/) inpem = 1; next }
+        i = index($0, "="); name = substr($0, 1, i); val = substr($0, i + 1)
+        v = val; sub(/^[[:space:]]+/, "", v); c = substr(v, 1, 1)
         if ((c == "\"" || c == "\047") && index(substr(v, 2), c) == 0) { inq = 1; q = c }
         if (val ~ /-----BEGIN/ && val !~ /-----END/) inpem = 1
-        print substr($0, 1, i) " " substr(val, 1, 7) "…[REDACTED]"
-      }' "$f"); rc_body=$?
+        if (length(name) > 65) next
+        if (v ~ /^[[:space:]]*$/) { pend = name; next }
+        print name " " show(val)
+      }
+      END { if (pend != "") print pend " [empty]" }' "$f"); rc_body=$?
     if [ "$rc_body" -ne 0 ] || { [ -z "$body" ] && [ ! -s "$f" ]; }; then
       say "NOTRUN: $f exists but could not be read in 30s (the cloud client has not materialised it). Open it manually — treat every key inside as sync-exposed until seen."
       continue
@@ -279,19 +324,28 @@ hdr "2d. keys inlined in MCP config"
 # `claude mcp list`, including over someone's shoulder or on a shared screen.
 # Each grep's exit status is kept. macOS grep rejects a repetition count above 255,
 # and that error, hidden by 2>/dev/null, used to read as CLEAN.
+# The whole file is searched, not line by line. "args" is usually an indented,
+# multi-line array, and a line-based grep only ever saw its first line. A key in an
+# "env" block counts too: the file is plain text in the home folder, copied by every
+# backup and sync client. The command/args read only decides which message to print.
 CJ="$HOME/.claude.json"
 if [ ! -f "$CJ" ]; then
   say "CLEAN: no ~/.claude.json, so there are no MCP command strings to check"
 else
-  cmds=$(cap 30 grep -oE '"(command|args)":[^]]*' "$CJ"); rc_cmd=$?
+  cap 30 grep -qE "$KEYPAT" "$CJ"; rc_any=$?
   rc_key=1
-  if [ "$rc_cmd" -eq 0 ]; then grep -qiE "$KEYPAT" <<< "$cmds"; rc_key=$?; fi
-  if [ "$rc_key" -eq 0 ]; then
-    say "FINDING: ~/.claude.json has key material inline in an MCP command string (prints in full on every 'claude mcp list')"
-  elif [ "$rc_cmd" -gt 1 ] || [ "$rc_key" -gt 1 ]; then
-    say "NOTRUN: ~/.claude.json could not be searched (grep exit $rc_cmd then $rc_key. 142 = timed out). Not checked, so not clean."
+  if [ "$rc_any" -eq 0 ]; then
+    cmds=$(cap 30 perl -0777 -ne 'while(/"(command|args)"\s*:\s*(\[[^\]]*\]|"[^"]*")/g){print "$2\n"}' "$CJ")
+    [ -n "$cmds" ] && { grep -qE "$KEYPAT" <<< "$cmds"; rc_key=$?; }
+  fi
+  if [ "$rc_any" -eq 0 ] && [ "$rc_key" -eq 0 ]; then
+    say "FINDING: ~/.claude.json has key material inline in an MCP command or args list (prints in full on every 'claude mcp list')"
+  elif [ "$rc_any" -eq 0 ]; then
+    say "FINDING: ~/.claude.json holds live-format key material in plain text outside any command or args list (an MCP env block, say). The file sits unencrypted in the home folder and is copied by backups and sync"
+  elif [ "$rc_any" -eq 1 ]; then
+    say "CLEAN: ~/.claude.json holds no live-format key anywhere (whole file searched, command, args and env blocks included)"
   else
-    say "CLEAN: ~/.claude.json has no key material inline in MCP command strings"
+    say "NOTRUN: ~/.claude.json could not be searched (grep exit $rc_any. 142 = timed out). Not checked, so not clean."
   fi
 fi
 
@@ -379,18 +433,45 @@ if [ "$ROUTE_FINDING" -eq 0 ]; then
 fi
 
 hdr "CORS wildcards and unsigned webhooks"
-cors=$(grep -rlE "Access-Control-Allow-Origin['\"]?\s*[:,]\s*['\"]\*" "$HOME"/*/src 2>/dev/null | head -3)
-if [ -n "$cors" ]; then say "FINDING: wildcard CORS in: $cors"; else say "CLEAN: no wildcard CORS in any src/ tree"; fi
-hooks=$(grep -rliE "webhook" "$HOME"/*/src 2>/dev/null | head -5)
-if [ -n "$hooks" ]; then
-  for h in $hooks; do
-    grep -qiE "signature|hmac|verifyWebhook|constructEvent" "$h" 2>/dev/null \
-      && say "CLEAN: webhook handler ${h#$HOME/} verifies signatures" \
-      || say "FINDING: webhook handler ${h#$HOME/} does not verify a signature"
-  done
+# Every repo found in PHASE 1 is searched, wherever it sits (Documents, Dropbox,
+# ~/code/clients/app). Only looking in ~/<folder>/src missed most real projects.
+# Webhook handlers are looked for in code files only, so a README that mentions
+# webhooks is not reported as an unsigned handler.
+CORS_HITS=""
+HOOK_FILES=""
+WEB_NOTRUN=0
+for r in ${REPOS[@]+"${REPOS[@]}"}; do
+  c=$(cap 30 grep -rlIE "Access-Control-Allow-Origin['\"]?\s*[:,]\s*['\"]\*" "$r" --exclude-dir=node_modules --exclude-dir=.git); rc_c=$?
+  w=$(cap 30 grep -rliIE "webhook" "$r" --exclude-dir=node_modules --exclude-dir=.git \
+        --include='*.js' --include='*.mjs' --include='*.cjs' --include='*.jsx' --include='*.ts' \
+        --include='*.tsx' --include='*.py' --include='*.rb' --include='*.go' --include='*.php'); rc_w=$?
+  if [ "$rc_c" -gt 1 ] || [ "$rc_w" -gt 1 ]; then
+    say "NOTRUN: CORS and webhook search in $(basename "$r") did not complete (grep exit $rc_c and $rc_w. 142 = timed out)"
+    WEB_NOTRUN=1
+  fi
+  [ -n "$c" ] && CORS_HITS="$CORS_HITS$c"$'\n'
+  [ -n "$w" ] && HOOK_FILES="$HOOK_FILES$w"$'\n'
+done
+if [ -n "$CORS_HITS" ]; then
+  while IFS= read -r f; do [ -n "$f" ] && say "FINDING: wildcard CORS in ${f#$HOME/}"; done <<< "$CORS_HITS"
 else
-  say "CLEAN: no webhook handlers exist, so there is no signature check to get wrong"
+  say "CLEAN: no wildcard CORS in the ${#REPOS[@]} repos found"
 fi
+if [ -n "$HOOK_FILES" ]; then
+  while IFS= read -r h; do
+    [ -z "$h" ] && continue
+    # Comments are stripped first, so "// no signature check" is not read as a check.
+    if sed -E 's#/\*.*\*/##g; s#//.*$##; s/(^|[[:space:]])#.*$//; /^[[:space:]]*\*/d' "$h" 2>/dev/null \
+         | grep -qiE "signature|hmac|verifyWebhook|constructEvent"; then
+      say "CLEAN: webhook handler ${h#$HOME/} verifies signatures"
+    else
+      say "FINDING: webhook handler ${h#$HOME/} does not verify a signature"
+    fi
+  done <<< "$HOOK_FILES"
+else
+  say "CLEAN: no webhook handlers in the ${#REPOS[@]} repos found, so there is no signature check to get wrong"
+fi
+[ "$WEB_NOTRUN" -eq 1 ] && say "NOTRUN: the repos marked NOTRUN above are not covered by the CORS and webhook lines"
 
 hdr "dependency vulnerabilities"
 DEPS_CHECKED=0
